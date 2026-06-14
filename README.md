@@ -190,6 +190,25 @@ In production the Express server (`backend/server.js`) serves the static
 `frontend/dist` bundle, so a single Node process hosts everything on `PORT`
 (default `4000`).
 
+### Deploy to Render (one-click blueprint)
+
+This repo includes a [`render.yaml`](./render.yaml) blueprint, so deploying is:
+
+1. Push this repo to GitHub.
+2. In the [Render dashboard](https://dashboard.render.com): **New + → Blueprint**,
+   then select this repo. Render auto-detects `render.yaml`.
+3. Click **Apply**. Render runs `npm install && npm run build`, then `npm start`,
+   and gives you a public `https://<your-app>.onrender.com` URL.
+
+Render injects `$PORT` automatically and supports WebSockets on all plans
+(including free). Note: free instances sleep after ~15 min idle and cold-start
+on the next request — fine for demos; upgrade for always-on.
+
+> Heads-up: the frontend build tool (Vite) is a `devDependency`. The blueprint
+> deliberately leaves `NODE_ENV` unset during build so dev deps install and the
+> client can bundle. If you deploy manually, make sure your build step installs
+> dev dependencies (don't set `NODE_ENV=production` for the build).
+
 **Environment variables**
 
 | Variable          | Where     | Default     | Purpose                                   |

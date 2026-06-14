@@ -1,0 +1,33 @@
+# Render Blueprint for MathClash
+# ---------------------------------------------------------------------------
+# Deploys the whole game as a single Node web service: the Express backend
+# builds + serves the React frontend AND the Socket.IO websockets on one port.
+#
+# To use:
+#   1. Push this repo to GitHub.
+#   2. In the Render dashboard: New +  ->  Blueprint  ->  select this repo.
+#      (Render auto-detects this render.yaml.)
+#   3. Click Apply. Render runs the build, then `npm start`.
+#
+# Render injects $PORT automatically; server.js reads process.env.PORT.
+# WebSockets work out of the box on all Render plans (including free).
+# ---------------------------------------------------------------------------
+services:
+  - type: web
+    name: mathclash
+    runtime: node
+    plan: free
+    # Install root + backend + frontend deps (incl. Vite) and build the client.
+    # NODE_ENV is intentionally left unset during build so devDependencies
+    # (like Vite) install and the frontend can be bundled.
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      # CORS allow-list. "*" is fine for a single-origin deploy (the backend
+      # serves the frontend itself). Lock this down if you split hosting.
+      - key: CLIENT_ORIGIN
+        value: "*"
