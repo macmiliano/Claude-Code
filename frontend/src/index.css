@@ -1,0 +1,59 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply font-body text-ink antialiased;
+    /* Cheerful sky-to-grass gradient backdrop used across the app. */
+    background: linear-gradient(180deg, #bde0fe 0%, #cdeac0 100%);
+    background-attachment: fixed;
+  }
+  h1,
+  h2,
+  h3 {
+    @apply font-display;
+  }
+  /* Larger default tap targets for mobile + clear focus rings for a11y. */
+  button,
+  input {
+    @apply focus:outline-none focus-visible:ring-4 focus-visible:ring-grape/50;
+  }
+}
+
+@layer components {
+  /* Chunky cartoon button with a pressable "pop" shadow. */
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-2xl px-6 py-3
+      font-display text-lg font-semibold text-white shadow-pop
+      transition-transform active:translate-y-1 active:shadow-none
+      disabled:cursor-not-allowed disabled:opacity-60;
+    min-height: 52px;
+  }
+  .btn-primary {
+    @apply btn bg-coral hover:brightness-105;
+  }
+  .btn-secondary {
+    @apply btn bg-grape hover:brightness-105;
+  }
+  .btn-grass {
+    @apply btn bg-grass hover:brightness-105;
+  }
+  .btn-sun {
+    @apply btn bg-sunny text-ink hover:brightness-105;
+  }
+  .card {
+    @apply rounded-3xl bg-white/90 p-6 shadow-pop-lg backdrop-blur;
+  }
+  .input-field {
+    @apply w-full rounded-2xl border-4 border-grape/30 bg-white px-5 py-3
+      text-center font-display text-2xl text-ink placeholder:text-ink/30
+      focus:border-grape;
+    min-height: 56px;
+  }
+}
