@@ -59,6 +59,7 @@ export function GameProvider({ children }) {
         players: data.players,
         mode: data.mode,
         difficulty: data.difficulty,
+        opponent: data.opponent ?? prev?.opponent,
         status: 'playing',
       }));
       setQuestion(data.question);
@@ -133,21 +134,28 @@ export function GameProvider({ children }) {
   // Action helpers (wrap socket emits with acknowledgements where useful).
   // -------------------------------------------------------------------------
   const createRoom = useCallback(
-    (difficulty, mode) =>
+    ({ difficulty, mode, opponent = 'human', teamSize = 2, botLevel = 'medium' }) =>
       new Promise((resolve) => {
-        socket.emit('create-room', { username, difficulty, mode }, (res) => {
-          if (res?.ok) {
-            setPlayerId(res.playerId);
-            setRoom({
-              code: res.roomCode,
-              mode: res.mode,
-              difficulty: res.difficulty,
-              status: 'waiting',
-              players: [],
-            });
-          }
-          resolve(res);
-        });
+        socket.emit(
+          'create-room',
+          { username, difficulty, mode, opponent, teamSize, botLevel },
+          (res) => {
+            if (res?.ok) {
+              setPlayerId(res.playerId);
+              setRoom({
+                code: res.roomCode,
+                mode: res.mode,
+                difficulty: res.difficulty,
+                opponent: res.opponent,
+                teamSize: res.teamSize,
+                botLevel: res.botLevel,
+                status: 'waiting',
+                players: [],
+              });
+            }
+            resolve(res);
+          },
+        );
       }),
     [username],
   );

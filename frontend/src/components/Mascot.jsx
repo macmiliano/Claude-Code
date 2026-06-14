@@ -6,6 +6,11 @@ import React from 'react';
  * "bear" (player 2 / right). `state` tweaks the expression for feedback.
  */
 export default function Mascot({ type = 'fox', size = 96, state = 'idle', flip = false, className = '' }) {
+  // Robot variant represents the computer opponent.
+  if (type === 'robot') {
+    return <RobotMascot size={size} state={state} flip={flip} className={className} />;
+  }
+
   const isFox = type === 'fox';
   const fur = isFox ? '#FF8C42' : '#9C6B3F';
   const furDark = isFox ? '#E8732C' : '#7E5430';
@@ -65,6 +70,42 @@ export default function Mascot({ type = 'fox', size = 96, state = 'idle', flip =
       {/* Cheeks */}
       <circle cx="30" cy="58" r="4" fill="#FF6B6B" opacity="0.5" />
       <circle cx="70" cy="58" r="4" fill="#FF6B6B" opacity="0.5" />
+    </svg>
+  );
+}
+
+/** The computer opponent: a friendly cartoon robot. */
+function RobotMascot({ size = 96, state = 'idle', flip = false, className = '' }) {
+  const eye = state === 'sad' ? '#FF6B6B' : '#38bdf8';
+  const mouth =
+    state === 'happy' ? 'M38 70 Q50 80 62 70' : state === 'sad' ? 'M38 76 Q50 68 62 76' : 'M40 72 h20';
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 100 100"
+      className={className}
+      style={{ transform: flip ? 'scaleX(-1)' : 'none' }}
+      role="img"
+      aria-label="Computer robot opponent"
+    >
+      {/* Antenna */}
+      <line x1="50" y1="18" x2="50" y2="6" stroke="#7E5430" strokeWidth="3" />
+      <circle cx="50" cy="5" r="4" fill="#FFD43B" />
+      {/* Head */}
+      <rect x="20" y="20" width="60" height="56" rx="14" fill="#B0BEC5" stroke="#607D8B" strokeWidth="3" />
+      {/* Face screen */}
+      <rect x="28" y="30" width="44" height="30" rx="8" fill="#2B2D42" />
+      {/* Eyes */}
+      <circle cx="40" cy="44" r="5" fill={eye} />
+      <circle cx="60" cy="44" r="5" fill={eye} />
+      {/* Mouth */}
+      <path d={mouth} stroke="#51CF66" strokeWidth="2.5" fill="none" strokeLinecap="round" />
+      {/* Ears / bolts */}
+      <rect x="14" y="40" width="6" height="16" rx="3" fill="#607D8B" />
+      <rect x="80" y="40" width="6" height="16" rx="3" fill="#607D8B" />
+      {/* Body hint */}
+      <rect x="34" y="76" width="32" height="10" rx="4" fill="#90A4AE" stroke="#607D8B" strokeWidth="2" />
     </svg>
   );
 }

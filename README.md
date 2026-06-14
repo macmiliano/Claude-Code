@@ -19,6 +19,9 @@ required to play.
 - **Three difficulties** — Elementary (arithmetic), Middle School (fractions),
   High School (algebra). Questions are generated **server-side** and never
   repeat within a session.
+- **Play vs Computer** — no friend needed! Face a server-driven AI bot in
+  **Solo** (1 human vs bot) or **Co-op** (2 humans share one side of the rope vs
+  the bot). Three bot skill levels: **Easy / Medium / Hard**.
 - **Guest play** — pick a display name and go. Optional account system is
   scaffolded (see below).
 - **Real-time** — Socket.IO keeps both clients in perfect sync (shared
@@ -45,7 +48,8 @@ mathclash/
 │   ├── server.js               # Express app + Socket.IO event wiring
 │   └── src/
 │       ├── questionGenerator.js# server-side math questions + answer validation
-│       ├── roomManager.js      # in-memory rooms, unique codes, TTL janitor
+│       ├── roomManager.js      # in-memory rooms (teams/sides), codes, TTL janitor
+│       ├── botStrategy.js      # computer-opponent timing + accuracy by level
 │       └── gameLogic.js        # win rules, scoring, rope physics (server-only)
 │
 └── frontend/                   # React (Vite) + Tailwind + Framer Motion
@@ -116,10 +120,10 @@ npm run dev:frontend  # Vite dev server on http://localhost:5173
 
 **Client → Server**
 
-| Event           | Payload                                   | Purpose                                  |
-| --------------- | ----------------------------------------- | ---------------------------------------- |
-| `create-room`   | `{ username, difficulty, mode }`          | Host creates a room → returns room code  |
-| `join-room`     | `{ username, roomCode }`                  | Second player joins by code              |
+| Event           | Payload                                                  | Purpose                                  |
+| --------------- | -------------------------------------------------------- | ---------------------------------------- |
+| `create-room`   | `{ username, difficulty, mode, opponent, teamSize, botLevel }` | Host creates a room → returns room code  |
+| `join-room`     | `{ username, roomCode }`                                 | Second player joins by code              |
 | `submit-answer` | `{ answer, responseMs }`                  | Submit an answer (validated server-side) |
 | `turn-timeout`  | `{}`                                      | Turn-based: active player ran out of time|
 | `play-again`    | `{}`                                      | Replay with the same opponent            |
@@ -143,6 +147,18 @@ npm run dev:frontend  # Vite dev server on http://localhost:5173
   (fractions, mixed numbers, decimals all accepted) and compared on the server.
 - **Rope position** (`gameLogic.js`): each correct answer pulls the rope
   `BASE_PULL` + a speed bonus (faster = bigger pull), clamped to 0–100.
+- **Teams / sides** (`gameLogic.js`): wins aggregate per *side* (0 = left/fox,
+  1 = right/bear), so two co-op humans pool their correct answers vs the bot.
+- **Computer opponent** (`botStrategy.js` + `server.js`): the bot is driven by
+  server-side timers with a human-like think delay and per-level accuracy
+  (Easy 60% / Medium 80% / Hard 95%). It validates through the exact same
+  answer path as a human — no special-casing.
+
+### Ways to play
+- **vs Friend** — create a room, share the 6-char code, play head-to-head.
+- **vs Computer · Solo** — one human vs the bot; starts instantly (no code).
+- **vs Computer · Co-op** — two humans share one side of the rope vs the bot;
+  create a room, a friend joins, then you both face the computer together.
 
 ---
 

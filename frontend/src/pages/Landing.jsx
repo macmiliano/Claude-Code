@@ -46,7 +46,7 @@ export default function Landing() {
           Math<span className="text-coral">Clash</span>
         </motion.h1>
         <p className="mx-auto mt-3 max-w-xl text-lg font-semibold text-ink/70">
-          Battle a friend head-to-head in a real-time math tug-of-war. Bright, fast, and fun for all ages!
+          Battle a friend — or the computer — in a real-time math tug-of-war. Bright, fast, and fun for all ages!
         </p>
 
         {/* Guest entry */}
