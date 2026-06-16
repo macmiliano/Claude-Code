@@ -272,6 +272,27 @@ function buildGameOverPayload(room, winnerId, winnerSide) {
   };
 }
 
+/**
+ * Full current-state snapshot for a spectator joining mid-game. Mirrors what an
+ * active player currently sees (minus the ability to answer), including the
+ * live question (answer stripped), rope position, and whose turn it is.
+ */
+function buildSpectatorState(room) {
+  return {
+    code: room.code,
+    mode: room.mode,
+    difficulty: room.difficulty,
+    opponent: room.opponent,
+    status: room.status,
+    players: publicPlayers(room),
+    question: publicQuestion(room.currentQuestion),
+    ropePosition: room.ropePosition,
+    turnId: room.mode === 'turn' ? currentTurnPlayer(room)?.id || null : null,
+    turnSeconds: TURN_SECONDS,
+    spectators: room.spectators ? room.spectators.size : 0,
+  };
+}
+
 /** Start (or restart) a match: flip to playing and deal the first question. */
 function startGame(room) {
   room.status = 'playing';
@@ -288,6 +309,7 @@ module.exports = {
   handleTimeout,
   setNextQuestion,
   buildGameOverPayload,
+  buildSpectatorState,
   publicPlayers,
   publicQuestion,
   pullAmount,

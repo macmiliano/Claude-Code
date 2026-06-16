@@ -56,7 +56,7 @@ function touch(room) {
  *                  (1 = solo-vs-cpu, 2 = human-vs-human or co-op-vs-cpu)
  * @param botLevel  'easy' | 'medium' | 'hard' (only used when opponent === 'cpu')
  */
-function createRoom({ hostSocketId, username, difficulty, mode, opponent = 'human', teamSize = 2, botLevel = 'medium' }) {
+function createRoom({ hostSocketId, username, difficulty, mode, opponent = 'human', teamSize = 2, botLevel = 'medium', userId = null }) {
   const code = generateUniqueCode();
   const room = {
     code,
@@ -66,7 +66,8 @@ function createRoom({ hostSocketId, username, difficulty, mode, opponent = 'huma
     teamSize, // number of humans required to start
     botLevel, // bot skill when opponent === "cpu"
     status: 'waiting', // waiting -> playing -> finished
-    players: [createPlayer({ socketId: hostSocketId, username, side: 0 })],
+    players: [createPlayer({ socketId: hostSocketId, username, side: 0, userId })],
+    spectators: new Set(), // socket ids of people watching (not playing)
     usedTexts: new Set(), // prevents repeated questions within the session
     currentQuestion: null,
     ropePosition: ROPE_CENTER, // tug-of-war only
@@ -82,10 +83,11 @@ function createRoom({ hostSocketId, username, difficulty, mode, opponent = 'huma
 }
 
 /** Build a fresh competitor record with zeroed stats. */
-function createPlayer({ socketId, username, side, isBot = false }) {
+function createPlayer({ socketId, username, side, isBot = false, userId = null }) {
   return {
     id: socketId || `bot:${Math.random().toString(36).slice(2, 9)}`, // bots have no socket
     socketId: socketId || null,
+    userId, // DB user id when this player is signed in (null for guests/bots)
     username: (username || 'Player').slice(0, 16),
     side, // 0 = left (fox), 1 = right (bear)
     slot: side, // kept for backward-compatible visuals (avatar by side)
@@ -141,7 +143,7 @@ function getRoomBySocket(socketId) {
  * (sharing with the host) when the opponent is the computer; otherwise they take
  * side 1 (classic 1-v-1). Returns { room, player } or { error }.
  */
-function joinRoom({ code, socketId, username }) {
+function joinRoom({ code, socketId, username, userId = null }) {
   const room = rooms.get(code);
   if (!room) return { error: 'Room not found. Check the code and try again.' };
   if (room.status !== 'waiting') return { error: 'That game has already started.' };
@@ -149,10 +151,60 @@ function joinRoom({ code, socketId, username }) {
 
   // vs-cpu co-op: the joining friend teams up on side 0. vs-human: they take side 1.
   const side = room.opponent === 'cpu' ? 0 : 1;
-  const player = createPlayer({ socketId, username, side });
+  const player = createPlayer({ socketId, username, side, userId });
   room.players.push(player);
   touch(room);
   return { room, player };
+}
+
+// ---------------------------------------------------------------------------
+// Spectators (Watch-Live)
+// ---------------------------------------------------------------------------
+
+/** Register a spectator socket on a room (no-op if the room is missing). */
+function addSpectator(code, socketId) {
+  const room = rooms.get(code);
+  if (!room) return null;
+  room.spectators.add(socketId);
+  touch(room);
+  return room;
+}
+
+/** Remove a spectator from a specific room. */
+function removeSpectator(code, socketId) {
+  const room = rooms.get(code);
+  if (room) room.spectators.delete(socketId);
+}
+
+/** Remove a socket from any room's spectator set (used on disconnect). */
+function removeSpectatorEverywhere(socketId) {
+  for (const room of rooms.values()) {
+    if (room.spectators.delete(socketId)) return room;
+  }
+  return null;
+}
+
+/** Public list of in-progress games for the Watch-Live page. */
+function listLiveGames() {
+  const live = [];
+  for (const room of rooms.values()) {
+    if (room.status !== 'playing') continue;
+    live.push({
+      code: room.code,
+      mode: room.mode,
+      difficulty: room.difficulty,
+      opponent: room.opponent,
+      spectators: room.spectators.size,
+      players: room.players.map((p) => ({
+        username: p.username,
+        side: p.side,
+        isBot: p.isBot,
+        correctCount: p.correctCount,
+      })),
+    });
+  }
+  // Most-watched first, then most progressed.
+  return live.sort((a, b) => b.spectators - a.spectators);
 }
 
 /** Reset a room's per-match state so the same players can "Play Again". */
@@ -224,5 +276,9 @@ module.exports = {
   startJanitor,
   touch,
   generateUniqueCode,
+  addSpectator,
+  removeSpectator,
+  removeSpectatorEverywhere,
+  listLiveGames,
   constants: { ROOM_TTL_MS, WINNING_CORRECT, ROPE_CENTER },
 };

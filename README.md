@@ -22,8 +22,17 @@ required to play.
 - **Play vs Computer** — no friend needed! Face a server-driven AI bot in
   **Solo** (1 human vs bot) or **Co-op** (2 humans share one side of the rope vs
   the bot). Three bot skill levels: **Easy / Medium / Hard**.
-- **Guest play** — pick a display name and go. Optional account system is
-  scaffolded (see below).
+- **Guest play** — pick a display name and go, no sign-up required.
+- **Google sign-in (optional)** — log in with Google to save your progress.
+  Powered by Google Identity Services + a JWT session; gracefully disabled when
+  not configured.
+- **Accounts, points & leaderboard** — registered players earn **points**
+  (**+25 per win, +1 per correct answer**), and get a personal dashboard
+  (lifetime stats, win/loss, accuracy per difficulty, recent match history). A
+  global **leaderboard** ranks everyone by points. Persisted in **PostgreSQL**.
+- **Watch Live (spectator mode)** — browse a list of in-progress matches and
+  **watch any of them live**, Clash-Royale-style (or watch by room code). The
+  rope, scores, and questions update in real time for spectators too.
 - **Real-time** — Socket.IO keeps both clients in perfect sync (shared
   questions, live rope, turn handoff).
 - **Cartoon UI** — Fredoka/Nunito fonts, bouncing mascots, confetti on win,
@@ -48,9 +57,12 @@ mathclash/
 │   ├── server.js               # Express app + Socket.IO event wiring
 │   └── src/
 │       ├── questionGenerator.js# server-side math questions + answer validation
-│       ├── roomManager.js      # in-memory rooms (teams/sides), codes, TTL janitor
+│       ├── roomManager.js      # in-memory rooms (teams/sides), spectators, codes
 │       ├── botStrategy.js      # computer-opponent timing + accuracy by level
-│       └── gameLogic.js        # win rules, scoring, rope physics (server-only)
+│       ├── gameLogic.js        # win rules, scoring, rope physics (server-only)
+│       ├── db.js               # PostgreSQL pool + schema (optional accounts)
+│       ├── stats.js            # user upsert, match recording, profile, leaderboard
+│       └── auth.js             # Google ID-token verification + JWT sessions
 │
 └── frontend/                   # React (Vite) + Tailwind + Framer Motion
     ├── package.json
@@ -59,24 +71,32 @@ mathclash/
     ├── postcss.config.js
     ├── index.html
     └── src/
-        ├── main.jsx            # app bootstrap (Router + GameProvider)
+        ├── main.jsx            # app bootstrap (Router + Auth/Game providers)
         ├── App.jsx             # route table
         ├── index.css           # Tailwind layers + cartoon component styles
-        ├── socket.js           # shared Socket.IO client
+        ├── socket.js           # shared Socket.IO client (sends JWT in handshake)
+        ├── api.js              # REST helper + token storage (accounts)
         ├── context/
-        │   └── GameContext.jsx # all multiplayer state + socket handlers
+        │   ├── GameContext.jsx # all multiplayer + spectator state + socket handlers
+        │   └── AuthContext.jsx # optional Google account state
         ├── components/
-        │   ├── Mascot.jsx      # inline SVG fox & bear (no image assets needed)
+        │   ├── Mascot.jsx      # inline SVG fox, bear & robot (no image assets)
         │   ├── TugRope.jsx     # animated tug-of-war rope + mascots
-        │   ├── Scoreboard.jsx  # turn-based side-by-side scores
+        │   ├── Scoreboard.jsx  # turn-based team scores
         │   ├── QuestionCard.jsx# question display + answer input + feedback FX
-        │   └── Confetti.jsx    # winner confetti burst
+        │   ├── Confetti.jsx    # winner confetti burst
+        │   ├── AuthControls.jsx# Google login button + user badge
+        │   └── TopNav.jsx      # shared header (Watch / Leaders / sign-in)
         └── pages/
-            ├── Landing.jsx     # hero + guest name entry
-            ├── Lobby.jsx       # difficulty/mode pick + create/join room
+            ├── Landing.jsx     # hero + guest name entry + sign-in
+            ├── Lobby.jsx       # difficulty/mode/opponent pick + create/join
             ├── WaitingRoom.jsx # share code + "waiting for opponent"
             ├── Game.jsx        # live gameplay (both modes)
-            └── GameOver.jsx    # leaderboard, stats, confetti, play again
+            ├── GameOver.jsx    # results, stats, confetti, play again
+            ├── Profile.jsx     # signed-in dashboard (points, stats, history)
+            ├── Leaderboard.jsx # global ranking by points
+            ├── WatchLive.jsx   # list of live games to spectate
+            └── Spectate.jsx    # read-only live view of a match
 ```
 
 ---
@@ -139,6 +159,16 @@ npm run dev:frontend  # Vite dev server on http://localhost:5173
 | `next-question`       | The next shared question                                 |
 | `game-over`           | Winner + per-player stats                                |
 | `player-disconnected` | A player left; remaining player is notified              |
+| `spectator-state`     | Full current snapshot pushed to a new spectator          |
+| `spectators-update`   | Live count of people watching a room                     |
+
+**Spectator events:** `spectate-room {roomCode}`, `stop-spectating`,
+`list-live-games` (client→server). Spectators join the Socket.IO room read-only
+— the server only accepts answers from registered players (anti-cheat).
+
+**REST API (accounts/spectating):** `GET /api/config`,
+`POST /api/auth/google`, `GET /api/me`, `GET /api/me/history`,
+`GET /api/leaderboard`, `GET /api/live-games`.
 
 ### Key logic, in one line each
 - **Room management** (`roomManager.js`): 6-char unique codes from an
@@ -162,20 +192,60 @@ npm run dev:frontend  # Vite dev server on http://localhost:5173
 
 ---
 
-## 🔐 Optional Account System (scaffold)
+## 🔐 Accounts, Points & Leaderboard (optional)
 
-Guest play requires **no database**. The optional registered-account experience
-(persistent win/loss, accuracy per difficulty, game history dashboard) is
-described in the UI and can be layered on with a lightweight DB:
+Guest play needs **no setup**. To enable Google login, persistent points/stats,
+and the leaderboard, configure three environment variables on the backend:
 
-1. Add `better-sqlite3` (or MongoDB) to `backend/package.json`.
-2. Create `backend/src/db.js` with `users` and `matches` tables.
-3. Add Express routes: `POST /api/register`, `POST /api/login` (hash passwords
-   with `bcrypt`, issue a JWT), and `GET /api/me/history`.
-4. On `game-over`, persist the match for any authenticated player.
+| Variable          | What it is                                                            |
+| ----------------- | --------------------------------------------------------------------- |
+| `DATABASE_URL`    | A PostgreSQL connection string (Neon / Supabase / Render Postgres).   |
+| `GOOGLE_CLIENT_ID`| An OAuth 2.0 **Web** client id from Google Cloud Console.             |
+| `JWT_SECRET`      | Any long random string used to sign session tokens.                   |
 
-The end-of-game leaderboard is already shown to **both** guests and registered
-users — only registered users would have their history saved.
+When all three are present, the schema is auto-created on boot and the
+`/api/config` endpoint flips `accountsEnabled` to `true`, so the frontend shows
+the sign-in button automatically. If any are missing, the app silently stays in
+guest-only mode.
+
+### 1. Create a PostgreSQL database (free)
+Spin up a free database at **[Neon](https://neon.tech)** or
+**[Supabase](https://supabase.com)** (or add a Render PostgreSQL instance), then
+copy its connection string into `DATABASE_URL`. Tables (`users`, `matches`) are
+created automatically — no migrations to run.
+
+### 2. Create a Google OAuth client id
+1. Go to **[Google Cloud Console](https://console.cloud.google.com/apis/credentials)**
+   → **Create Credentials → OAuth client ID → Web application**.
+2. Under **Authorized JavaScript origins**, add your site origin(s), e.g.
+   `http://localhost:5173` (dev) and `https://your-app.onrender.com` (prod).
+3. Copy the **Client ID** into `GOOGLE_CLIENT_ID`. (No client *secret* is needed
+   — we verify Google ID tokens directly.)
+
+### 3. Set a JWT secret
+Any long random value, e.g. `openssl rand -hex 32`. On Render the blueprint
+auto-generates this for you.
+
+### How points work
+On every finished match, each signed-in player earns
+**`+25` for a win and `+1` per correct answer**. Lifetime points drive the
+global leaderboard; per-difficulty accuracy and full match history appear on the
+profile dashboard. Guests can still play and watch — their results just aren't
+saved.
+
+---
+
+## 📺 Watch Live (spectator mode)
+
+Anyone can spectate in-progress matches — no account required:
+
+- The **Watch** page polls `GET /api/live-games` for a list of live matches.
+- Clicking one (or entering a room code) emits `spectate-room`; the server adds
+  you to the match's broadcast room and pushes a `spectator-state` snapshot.
+- You then receive the same live `answer-result` / `next-question` / `game-over`
+  events as the players, rendered **read-only** (no answer input).
+- The server only accepts `submit-answer` from actual players, so spectators can
+  never influence a game.
 
 ---
 
@@ -211,11 +281,17 @@ on the next request — fine for demos; upgrade for always-on.
 
 **Environment variables**
 
-| Variable          | Where     | Default     | Purpose                                   |
-| ----------------- | --------- | ----------- | ----------------------------------------- |
-| `PORT`            | backend   | `4000`      | HTTP/WebSocket port                       |
-| `CLIENT_ORIGIN`   | backend   | `*`         | CORS allow-list for the frontend origin   |
-| `VITE_SERVER_URL` | frontend  | same-origin | Point the client at a remote API if split |
+| Variable           | Where     | Default     | Purpose                                       |
+| ------------------ | --------- | ----------- | --------------------------------------------- |
+| `PORT`             | backend   | `4000`      | HTTP/WebSocket port                           |
+| `CLIENT_ORIGIN`    | backend   | `*`         | CORS allow-list for the frontend origin       |
+| `DATABASE_URL`     | backend   | _(unset)_   | Postgres connection string (enables accounts) |
+| `GOOGLE_CLIENT_ID` | backend   | _(unset)_   | Google OAuth Web client id (enables login)    |
+| `JWT_SECRET`       | backend   | _(unset)_   | Signs session tokens (required for accounts)  |
+| `VITE_SERVER_URL`  | frontend  | same-origin | Point the client at a remote API if split     |
+
+The last three are optional — leave them unset to run guest-only. See
+**Accounts, Points & Leaderboard** above for setup.
 
 Deployable to any Node host (Render, Railway, Fly.io, a VPS, etc.). For split
 hosting (static frontend + separate API), set `VITE_SERVER_URL` at build time
@@ -238,6 +314,8 @@ and `CLIENT_ORIGIN` on the server.
 | Frontend    | React 18, React Router, Vite, Tailwind CSS, Framer Motion |
 | Backend     | Node.js, Express, Socket.IO                       |
 | Real-time   | WebSockets via Socket.IO                          |
-| State       | In-memory rooms (no DB needed for guest play)     |
+| Auth        | Google Identity Services + JWT (`@react-oauth/google`, `google-auth-library`) |
+| Database    | PostgreSQL via `pg` (optional — guest play needs none) |
+| State       | In-memory rooms for live games; Postgres for accounts/points |
 
 Happy clashing! 🦊🆚🐻
