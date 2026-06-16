@@ -4,28 +4,29 @@
  * Express + Socket.IO entry point for MathClash.
  *
  * Responsibilities:
- *   - serve a tiny health endpoint (and the built frontend in production)
- *   - wire up the real-time multiplayer protocol (see the socket events below)
- *   - drive the computer opponent (bot) via server-side timers
+ *   - REST API: health, config, Google auth, profile/history, leaderboard, live games
+ *   - real-time multiplayer protocol (rooms, gameplay, bot, spectators)
+ *   - serve the built frontend in production
  *
- * Socket protocol (client -> server):
+ * Socket protocol — client -> server:
  *   create-room   { username, difficulty, mode, opponent, teamSize, botLevel }
- *                                                     -> ack { roomCode, playerId, ... }
- *   join-room     { username, roomCode }              -> ack { ok, playerId, ... } | { ok:false, error }
+ *   join-room     { username, roomCode }
  *   submit-answer { answer, responseMs }
- *   turn-timeout  {}                                  (turn mode: active player ran out of time)
+ *   turn-timeout  {}
  *   play-again    {}
  *   leave-room    {}
+ *   spectate-room { roomCode }          -> ack { ok, error? }  (Watch-Live)
+ *   stop-spectating {}
+ *   list-live-games {}                  -> ack [ live games ]
  *
- * Socket protocol (server -> client):
- *   room-update          { code, players, difficulty, mode, opponent, teamSize, status }
- *   game-start           { question, players, mode, difficulty, opponent, turnId, turnSeconds }
- *   answer-result        { correct, playerId, winnerSide, ropePosition?, players, nextTurnId? }
- *   next-question        { question, turnId?, turnSeconds? }
- *   game-over            { winnerId, winnerSide, stats, mode, difficulty }
- *   player-disconnected  { message }
+ * Socket protocol — server -> client:
+ *   room-update, game-start, answer-result, next-question, game-over,
+ *   player-disconnected, spectator-state, spectators-update
  * -----------------------------------------------------------------------------
  */
+
+// Load backend/.env (if present) before anything reads process.env.
+require('dotenv').config();
 
 const http = require('http');
 const path = require('path');
@@ -36,6 +37,9 @@ const { Server } = require('socket.io');
 const roomManager = require('./src/roomManager');
 const gameLogic = require('./src/gameLogic');
 const botStrategy = require('./src/botStrategy');
+const db = require('./src/db');
+const stats = require('./src/stats');
+const auth = require('./src/auth');
 
 const PORT = process.env.PORT || 4000;
 const CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || '*';
@@ -44,12 +48,74 @@ const app = express();
 app.use(cors({ origin: CLIENT_ORIGIN }));
 app.use(express.json());
 
-// Simple health check (useful for deploy platforms).
+// ---------------------------------------------------------------------------
+// REST API (registered BEFORE the static/SPA catch-all)
+// ---------------------------------------------------------------------------
+
 app.get('/api/health', (_req, res) => {
   res.json({ ok: true, rooms: roomManager.rooms.size, uptime: process.uptime() });
 });
 
-// In production, serve the built React app from frontend/dist.
+// Tells the frontend whether login/leaderboard are available + the Google client id.
+app.get('/api/config', (_req, res) => {
+  res.json({
+    googleClientId: auth.googleClientId || null,
+    accountsEnabled: db.enabled && auth.configured,
+  });
+});
+
+// Exchange a Google ID-token ("credential") for our own session JWT.
+app.post('/api/auth/google', async (req, res) => {
+  if (!auth.configured || !db.enabled) {
+    return res.status(503).json({ error: 'Accounts are not enabled on this server.' });
+  }
+  try {
+    const profile = await auth.verifyGoogleCredential(req.body?.credential);
+    const user = await stats.upsertGoogleUser(profile);
+    const token = auth.signToken(user);
+    res.json({ token, user: stats.publicUser(user) });
+  } catch (err) {
+    res.status(401).json({ error: 'Google sign-in failed.' });
+  }
+});
+
+// Current signed-in user.
+app.get('/api/me', auth.requireAuth, async (req, res) => {
+  try {
+    const user = await stats.getUserById(req.user.uid);
+    if (!user) return res.status(404).json({ error: 'User not found.' });
+    res.json({ user: stats.publicUser(user) });
+  } catch {
+    res.status(500).json({ error: 'Server error.' });
+  }
+});
+
+// Profile dashboard: lifetime stats + history + per-difficulty breakdown.
+app.get('/api/me/history', auth.requireAuth, async (req, res) => {
+  try {
+    const profile = await stats.getProfile(req.user.uid);
+    res.json(profile || { error: 'not found' });
+  } catch {
+    res.status(500).json({ error: 'Server error.' });
+  }
+});
+
+// Global leaderboard (top players by lifetime points).
+app.get('/api/leaderboard', async (_req, res) => {
+  if (!db.enabled) return res.json({ enabled: false, leaderboard: [] });
+  try {
+    res.json({ enabled: true, leaderboard: await stats.getLeaderboard(25) });
+  } catch {
+    res.status(500).json({ error: 'Server error.' });
+  }
+});
+
+// Public list of in-progress games to watch.
+app.get('/api/live-games', (_req, res) => {
+  res.json({ games: roomManager.listLiveGames() });
+});
+
+// In production, serve the built React app from frontend/dist (after the API).
 const distDir = path.join(__dirname, '..', 'frontend', 'dist');
 app.use(express.static(distDir));
 app.get('*', (_req, res, next) => {
@@ -65,7 +131,10 @@ const io = new Server(server, {
 
 const { TURN_SECONDS } = gameLogic.constants;
 
-/** Emit the current room snapshot to everyone in the room. */
+// ---------------------------------------------------------------------------
+// Broadcast helpers
+// ---------------------------------------------------------------------------
+
 function broadcastRoom(room) {
   io.to(room.code).emit('room-update', {
     code: room.code,
@@ -79,7 +148,10 @@ function broadcastRoom(room) {
   });
 }
 
-/** Cancel any pending bot action for a room. */
+function broadcastSpectators(room) {
+  io.to(room.code).emit('spectators-update', { count: room.spectators.size });
+}
+
 function clearBot(room) {
   if (room.botTimer) {
     clearTimeout(room.botTimer);
@@ -87,9 +159,8 @@ function clearBot(room) {
   }
 }
 
-/** Kick off a match once the required humans are present (adds a bot if vs-cpu). */
 function beginGame(room) {
-  roomManager.ensureBot(room); // no-op unless opponent === 'cpu'
+  roomManager.ensureBot(room);
   gameLogic.startGame(room);
   io.to(room.code).emit('game-start', {
     question: gameLogic.publicQuestion(room.currentQuestion),
@@ -100,31 +171,42 @@ function beginGame(room) {
     turnId: room.mode === 'turn' ? gameLogic.currentTurnPlayer(room)?.id : null,
     turnSeconds: TURN_SECONDS,
   });
-  scheduleBot(room, true); // arm the computer opponent for the first question
+  scheduleBot(room, true);
 }
 
-/** Start the game automatically once enough humans have joined. */
 function maybeStart(room) {
   if (room.status !== 'waiting') return;
   if (roomManager.humanCount(room) < room.teamSize) return;
-  // Brief pause so both clients can render the transition.
   const delay = room.opponent === 'cpu' && room.teamSize === 1 ? 700 : 1200;
   setTimeout(() => {
     if (room.status === 'waiting' && roomManager.humanCount(room) >= room.teamSize) beginGame(room);
   }, delay);
 }
 
-/** Shared end-of-game broadcast. */
+/** Persist match results for any signed-in human players (fire-and-forget). */
+function persistResults(room, winnerSide) {
+  if (!db.enabled) return;
+  for (const p of room.players) {
+    if (p.isBot || !p.userId) continue;
+    stats
+      .recordMatch(p.userId, {
+        mode: room.mode,
+        difficulty: room.difficulty,
+        opponent: room.opponent,
+        win: p.side === winnerSide,
+        correct: p.correctCount,
+        answered: p.answeredCount,
+      })
+      .catch((err) => console.error('recordMatch failed:', err.message));
+  }
+}
+
 function endGame(room, winnerId, winnerSide) {
   clearBot(room);
+  persistResults(room, winnerSide);
   io.to(room.code).emit('game-over', gameLogic.buildGameOverPayload(room, winnerId, winnerSide));
 }
 
-/**
- * Broadcast a turn/answer result and advance the shared state: emit the next
- * question (if any) and re-arm the bot. Used by both human submissions and the
- * bot's own moves so behaviour stays identical.
- */
 function emitResultAndAdvance(room, result) {
   io.to(room.code).emit('answer-result', {
     correct: result.correct,
@@ -144,16 +226,15 @@ function emitResultAndAdvance(room, result) {
   if (result.nextQuestion) {
     io.to(room.code).emit('next-question', {
       question: result.nextQuestion,
-      turnId: result.nextTurnId, // null in tug mode
+      turnId: result.nextTurnId,
       turnSeconds: TURN_SECONDS,
     });
-    scheduleBot(room, true); // fresh question -> reset the bot's think timer
+    scheduleBot(room, true);
   } else {
-    scheduleBot(room, false); // wrong tug answer -> keep the bot racing
+    scheduleBot(room, false);
   }
 }
 
-/** Validate + score a submission (from a human or the bot) and broadcast it. */
 function processAnswer(room, competitorId, answer, responseMs) {
   const result = gameLogic.handleAnswer(room, competitorId, answer, responseMs);
   if (!result.valid) return result;
@@ -161,48 +242,34 @@ function processAnswer(room, competitorId, answer, responseMs) {
   return result;
 }
 
-// ---------------------------------------------------------------------------
-// Computer opponent (bot) orchestration. The bot knows the answer server-side
-// but throttles itself with a human-like delay + accuracy cap (botStrategy.js).
-// ---------------------------------------------------------------------------
+// --- Computer opponent ----------------------------------------------------
 
-/** Pick the bot's submission: the real answer when "correct", else a wrong token. */
 function botSubmission(room, correct) {
   return correct ? String(room.currentQuestion.acceptable[0]) : 'wrong';
 }
 
-/** Tug mode: the bot attempts the current shared question, then keeps racing. */
 function botActTug(room) {
   if (room.status !== 'playing' || !room.currentQuestion) return;
   const bot = room.players.find((p) => p.isBot);
   if (!bot) return;
-  const correct = botStrategy.willAnswerCorrectly(room.botLevel);
-  processAnswer(room, bot.id, botSubmission(room, correct), undefined);
+  processAnswer(room, bot.id, botSubmission(room, botStrategy.willAnswerCorrectly(room.botLevel)), undefined);
 }
 
-/** Turn mode: the bot answers when it is its turn. */
 function botActTurn(room) {
   if (room.status !== 'playing' || !room.currentQuestion) return;
   const bot = room.players.find((p) => p.isBot);
   if (!bot || gameLogic.currentTurnPlayer(room)?.id !== bot.id) return;
-  const correct = botStrategy.willAnswerCorrectly(room.botLevel);
-  processAnswer(room, bot.id, botSubmission(room, correct), undefined);
+  processAnswer(room, bot.id, botSubmission(room, botStrategy.willAnswerCorrectly(room.botLevel)), undefined);
 }
 
-/**
- * (Re)arm the bot's next move. In tug mode the bot thinks continuously about the
- * current question (we don't reset its timer on every human keystroke unless the
- * question changed — `force`). In turn mode it only acts on its own turn.
- */
 function scheduleBot(room, force = false) {
   const bot = room.players.find((p) => p.isBot);
   if (room.status !== 'playing' || !bot) {
     clearBot(room);
     return;
   }
-
   if (room.mode === 'tug') {
-    if (room.botTimer && !force) return; // already thinking about this question
+    if (room.botTimer && !force) return;
     clearBot(room);
     room.botTimer = setTimeout(() => {
       room.botTimer = null;
@@ -219,21 +286,25 @@ function scheduleBot(room, force = false) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Socket.IO
+// ---------------------------------------------------------------------------
+
+// Identify signed-in sockets from the handshake auth token (optional).
+io.use((socket, next) => {
+  socket.data.user = auth.verifyToken(socket.handshake.auth?.token);
+  next();
+});
+
 io.on('connection', (socket) => {
-  // -------------------------------------------------------------------------
-  // create-room: host opens a room. vs-cpu solo starts immediately; vs-friend
-  // and co-op wait for the second human to join.
-  // -------------------------------------------------------------------------
+  const userId = () => socket.data.user?.uid || null;
+
   socket.on('create-room', ({ username, difficulty, mode, opponent, teamSize, botLevel }, ack) => {
-    const validDifficulty = ['elementary', 'middle', 'high'].includes(difficulty)
-      ? difficulty
-      : 'elementary';
+    const validDifficulty = ['elementary', 'middle', 'high'].includes(difficulty) ? difficulty : 'elementary';
     const validMode = ['tug', 'turn'].includes(mode) ? mode : 'tug';
     const validOpponent = opponent === 'cpu' ? 'cpu' : 'human';
     const validBotLevel = ['easy', 'medium', 'hard'].includes(botLevel) ? botLevel : 'medium';
-    // Humans needed before starting: vs-human is always 2; vs-cpu can be 1 (solo)
-    // or 2 (co-op).
-    let validTeamSize = validOpponent === 'human' ? 2 : Number(teamSize) === 2 ? 2 : 1;
+    const validTeamSize = validOpponent === 'human' ? 2 : Number(teamSize) === 2 ? 2 : 1;
 
     const room = roomManager.createRoom({
       hostSocketId: socket.id,
@@ -243,6 +314,7 @@ io.on('connection', (socket) => {
       opponent: validOpponent,
       teamSize: validTeamSize,
       botLevel: validBotLevel,
+      userId: userId(),
     });
     socket.join(room.code);
 
@@ -259,15 +331,17 @@ io.on('connection', (socket) => {
       });
     }
     broadcastRoom(room);
-    maybeStart(room); // solo-vs-cpu starts right away
+    maybeStart(room);
   });
 
-  // -------------------------------------------------------------------------
-  // join-room: a second human joins by code; the game auto-starts when full.
-  // -------------------------------------------------------------------------
   socket.on('join-room', ({ username, roomCode }, ack) => {
     const code = String(roomCode || '').toUpperCase().trim();
-    const { room, player, error } = roomManager.joinRoom({ code, socketId: socket.id, username });
+    const { room, player, error } = roomManager.joinRoom({
+      code,
+      socketId: socket.id,
+      username,
+      userId: userId(),
+    });
 
     if (error) {
       if (typeof ack === 'function') ack({ ok: false, error });
@@ -291,33 +365,22 @@ io.on('connection', (socket) => {
     maybeStart(room);
   });
 
-  // -------------------------------------------------------------------------
-  // submit-answer: validated entirely server-side (anti-cheat).
-  // -------------------------------------------------------------------------
   socket.on('submit-answer', ({ answer, responseMs }) => {
     const room = roomManager.getRoomBySocket(socket.id);
-    if (!room) return;
-    processAnswer(room, socket.id, answer, responseMs); // human id === socket.id
+    if (!room) return; // spectators / unknown sockets are ignored (anti-cheat)
+    processAnswer(room, socket.id, answer, responseMs);
   });
 
-  // -------------------------------------------------------------------------
-  // turn-timeout: turn-based active player ran out of time -> pass the turn.
-  // -------------------------------------------------------------------------
   socket.on('turn-timeout', () => {
     const room = roomManager.getRoomBySocket(socket.id);
     if (!room || room.mode !== 'turn') return;
-    // Only the player whose turn it currently is may trigger the timeout.
     if (gameLogic.currentTurnPlayer(room)?.id !== socket.id) return;
-
     const result = gameLogic.handleTimeout(room);
     if (!result.valid) return;
     result.timedOut = true;
     emitResultAndAdvance(room, result);
   });
 
-  // -------------------------------------------------------------------------
-  // play-again: reset the existing room and replay with the same line-up.
-  // -------------------------------------------------------------------------
   socket.on('play-again', () => {
     const room = roomManager.getRoomBySocket(socket.id);
     if (!room) return;
@@ -330,42 +393,77 @@ io.on('connection', (socket) => {
     beginGame(room);
   });
 
-  // -------------------------------------------------------------------------
-  // leave-room: voluntary exit (treated like a disconnect for the opponent).
-  // -------------------------------------------------------------------------
-  socket.on('leave-room', () => handleLeave(socket));
+  // ---- Spectating (Watch-Live) -------------------------------------------
 
+  socket.on('list-live-games', (ack) => {
+    if (typeof ack === 'function') ack({ games: roomManager.listLiveGames() });
+  });
+
+  socket.on('spectate-room', ({ roomCode }, ack) => {
+    const code = String(roomCode || '').toUpperCase().trim();
+    const room = roomManager.getRoom(code);
+    if (!room) {
+      if (typeof ack === 'function') ack({ ok: false, error: 'That game was not found.' });
+      return;
+    }
+    roomManager.addSpectator(code, socket.id);
+    socket.join(code); // receive all live game broadcasts
+    if (typeof ack === 'function') ack({ ok: true });
+    // Send the full current snapshot just to this spectator, then update counts.
+    socket.emit('spectator-state', gameLogic.buildSpectatorState(room));
+    broadcastSpectators(room);
+  });
+
+  socket.on('stop-spectating', ({ roomCode } = {}) => {
+    const code = String(roomCode || '').toUpperCase().trim();
+    const room = roomManager.getRoom(code);
+    roomManager.removeSpectator(code, socket.id);
+    socket.leave(code);
+    if (room) broadcastSpectators(room);
+  });
+
+  socket.on('leave-room', () => handleLeave(socket));
   socket.on('disconnect', () => handleLeave(socket));
 
-  /** Shared disconnect/leave handler: notify remaining humans and clean up. */
+  /** Shared disconnect/leave handler for both players and spectators. */
   function handleLeave(sock) {
+    // Spectator path: just drop them and update the watch count.
+    const specRoom = roomManager.removeSpectatorEverywhere(sock.id);
+    if (specRoom) {
+      sock.leave(specRoom.code);
+      broadcastSpectators(specRoom);
+    }
+
+    // Player path: end the match for the remaining humans.
     const room = roomManager.getRoomBySocket(sock.id);
     if (!room) return;
     sock.leave(room.code);
-
     const wasActive = room.status === 'playing' || room.status === 'waiting';
-    const remaining = roomManager.removePlayer(room, sock.id); // deletes room if no humans left
-
+    const remaining = roomManager.removePlayer(room, sock.id);
     if (remaining) {
       clearBot(room);
-      io.to(room.code).emit('player-disconnected', {
-        message: 'Your opponent left the game.',
-      });
+      io.to(room.code).emit('player-disconnected', { message: 'Your opponent left the game.' });
       room.status = 'finished';
       if (wasActive) broadcastRoom(room);
     }
   }
 });
 
-// Start the inactivity janitor (removes rooms idle > 30 min).
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
+
 const janitor = roomManager.startJanitor();
 
-server.listen(PORT, () => {
-  // eslint-disable-next-line no-console
-  console.log(`🎮 MathClash server listening on http://localhost:${PORT}`);
-});
+db.init()
+  .catch((err) => console.error('DB init failed:', err.message))
+  .finally(() => {
+    server.listen(PORT, () => {
+      // eslint-disable-next-line no-console
+      console.log(`🎮 MathClash server listening on http://localhost:${PORT}`);
+    });
+  });
 
-// Graceful shutdown for clean restarts in dev.
 process.on('SIGINT', () => {
   clearInterval(janitor);
   server.close(() => process.exit(0));

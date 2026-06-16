@@ -28,6 +28,12 @@ export function GameProvider({ children }) {
   const [opponentLeft, setOpponentLeft] = useState(false);
   const [connecting, setConnecting] = useState(!socket.connected);
 
+  // Spectator (Watch-Live) state.
+  const [spectating, setSpectating] = useState(false);
+  const [spectatorCount, setSpectatorCount] = useState(0);
+  const spectatingRef = useRef(false);
+  spectatingRef.current = spectating;
+
   // A monotonically increasing tick so pages can react to each new question
   // (e.g. reset the input and restart the turn timer) even if text repeats.
   const [questionTick, setQuestionTick] = useState(0);
@@ -70,7 +76,31 @@ export function GameProvider({ children }) {
       setGameOver(null);
       setOpponentLeft(false);
       setQuestionTick((t) => t + 1);
-      navigate('/game');
+      // Spectators stay on the watch screen; players are taken into the game.
+      if (!spectatingRef.current) navigate('/game');
+    }
+
+    // Full snapshot pushed when we start spectating a game already in progress.
+    function onSpectatorState(data) {
+      setRoom({
+        code: data.code,
+        mode: data.mode,
+        difficulty: data.difficulty,
+        opponent: data.opponent,
+        status: data.status,
+        players: data.players,
+      });
+      setQuestion(data.question);
+      setRopePosition(data.ropePosition ?? 50);
+      setTurnId(data.turnId);
+      setTurnSeconds(data.turnSeconds || 30);
+      setSpectatorCount(data.spectators || 0);
+      setGameOver(null);
+      setQuestionTick((t) => t + 1);
+    }
+
+    function onSpectatorsUpdate(data) {
+      setSpectatorCount(data.count || 0);
     }
 
     function onAnswerResult(data) {
@@ -96,13 +126,18 @@ export function GameProvider({ children }) {
     function onGameOver(data) {
       setGameOver(data);
       setRoom((prev) => ({ ...prev, status: 'finished' }));
-      navigate('/results');
+      // Spectators see the result inline on the watch screen.
+      if (!spectatingRef.current) navigate('/results');
     }
 
     function onPlayerDisconnected(data) {
-      setOpponentLeft(true);
       setLastResult(null);
-      // If we were mid-game, surface the result screen with the disconnect note.
+      if (spectatingRef.current) {
+        // The match we were watching ended because someone left.
+        setGameOver((prev) => prev || { disconnected: true, message: data.message, stats: [] });
+        return;
+      }
+      setOpponentLeft(true);
       setGameOver((prev) => prev || { disconnected: true, message: data.message, stats: [] });
       navigate('/results');
     }
@@ -115,6 +150,8 @@ export function GameProvider({ children }) {
     socket.on('next-question', onNextQuestion);
     socket.on('game-over', onGameOver);
     socket.on('player-disconnected', onPlayerDisconnected);
+    socket.on('spectator-state', onSpectatorState);
+    socket.on('spectators-update', onSpectatorsUpdate);
 
     if (socket.connected) setPlayerId(socket.id);
 
@@ -127,6 +164,8 @@ export function GameProvider({ children }) {
       socket.off('next-question', onNextQuestion);
       socket.off('game-over', onGameOver);
       socket.off('player-disconnected', onPlayerDisconnected);
+      socket.off('spectator-state', onSpectatorState);
+      socket.off('spectators-update', onSpectatorsUpdate);
     };
   }, [navigate]);
 
@@ -204,6 +243,33 @@ export function GameProvider({ children }) {
     navigate('/lobby');
   }, [navigate]);
 
+  // --- Spectating ---------------------------------------------------------
+  const startSpectate = useCallback(
+    (roomCode) =>
+      new Promise((resolve) => {
+        const code = String(roomCode || '').toUpperCase().trim();
+        socket.emit('spectate-room', { roomCode: code }, (res) => {
+          if (res?.ok) {
+            setSpectating(true);
+            setGameOver(null);
+            navigate('/spectate');
+          }
+          resolve(res);
+        });
+      }),
+    [navigate],
+  );
+
+  const stopSpectate = useCallback(() => {
+    socket.emit('stop-spectating', { roomCode: roomRef.current?.code });
+    setSpectating(false);
+    setRoom(null);
+    setQuestion(null);
+    setGameOver(null);
+    setRopePosition(50);
+    navigate('/watch');
+  }, [navigate]);
+
   const value = {
     // state
     username,
@@ -218,6 +284,8 @@ export function GameProvider({ children }) {
     opponentLeft,
     connecting,
     questionTick,
+    spectating,
+    spectatorCount,
     // setters / actions
     setUsername,
     createRoom,
@@ -226,6 +294,8 @@ export function GameProvider({ children }) {
     sendTimeout,
     playAgain,
     leaveRoom,
+    startSpectate,
+    stopSpectate,
   };
 
   return <GameContext.Provider value={value}>{children}</GameContext.Provider>;
